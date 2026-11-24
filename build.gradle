@@ -116,6 +116,49 @@ def scriptsJar = tasks.register('scriptsJar', com.github.jengelman.gradle.plugin
     reproducibleFileOrder = true
 }
 
+// Local and dev builds embed the engine for scripts to work even before a matching CDN artifact exists.
+// Release builds keep it out of the plugin jar so the published download stays small.
+def embedScripts = project.hasProperty('embedScripts')
+        ? project.property('embedScripts').toString().toBoolean()
+        : !project.hasProperty('buildVersion')
+def embeddedEngineDir = layout.buildDirectory.dir('generated/embedded-engine')
+def prepareEmbeddedEngine = tasks.register('prepareEmbeddedEngine') {
+    dependsOn scriptsJar
+    inputs.file(scriptsJar.flatMap { it.archiveFile })
+    outputs.dir(embeddedEngineDir)
+    doLast {
+        if (!embedScripts) return
+        def engine = scriptsJar.get().archiveFile.get().asFile
+        def out = new File(embeddedEngineDir.get().asFile, 'embedded')
+        out.mkdirs()
+        java.nio.file.Files.copy(engine.toPath(), new File(out, 'MCGUI-scripts.jar').toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+shadowJar {
+    if (embedScripts) {
+        dependsOn prepareEmbeddedEngine
+        from(new File(embeddedEngineDir.get().asFile, 'embedded/MCGUI-scripts.jar')) {
+            into 'embedded'
+        }
+    }
+    doLast {
+        if (!embedScripts) return
+        def pluginJar = archiveFile.get().asFile
+        def engineJar = scriptsJar.get().archiveFile.get().asFile
+        def env = [create: 'false']
+        def fs = java.nio.file.FileSystems.newFileSystem(pluginJar.toPath(), env)
+        try {
+            def target = fs.getPath('/embedded/MCGUI-scripts.jar')
+            java.nio.file.Files.createDirectories(target.parent)
+            java.nio.file.Files.copy(engineJar.toPath(), target,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            fs.close()
+        }
+    }
+}
+
 // The engine's version and SHA-256, in the plugin's jar: the plugin loads no engine but that very file.
 def engineInfo = layout.buildDirectory.dir('generated/engine-info')
 def writeEngineInfo = tasks.register('engineInfo') {

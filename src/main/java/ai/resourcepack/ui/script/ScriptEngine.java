@@ -31,11 +31,11 @@ import java.util.stream.Stream;
 
 /**
  * Where scripts come from. The script engine (Rhino, Babel, the canvas) is a jar of its own,
- * {@code MCGUI-scripts-<version>.jar}, kept out of the plugin's so the plugin stays small and a server that never shows
- * a script never has it. The first page with a script fetches it from the CDN into {@code plugins/MCGUI/libs/}, checks
- * it against the SHA-256 this build of the plugin was made with ({@code script-engine.properties}), and loads it; until
- * then that page shows without its canvases moving, and draws again once they can. A server with no internet can put
- * the file there by hand. Where the engine's classes are already on the classpath (tests), they are used as they are.
+ * {@code MCGUI-scripts-<version>.jar}, normally kept out of the plugin's so a server that never shows a script never
+ * has it. Builds that bundle the engine load it from the plugin jar; otherwise the first page with a script fetches it
+ * from the CDN into {@code plugins/MCGUI/libs/}. Either way, its SHA-256 must match this build's
+ * {@code script-engine.properties}. Where the engine's classes are already on the classpath (tests), they are used
+ * as they are.
  */
 public final class ScriptEngine {
     private static final String FACTORY = "ai.resourcepack.ui.script.engine.Engine";
@@ -161,18 +161,27 @@ public final class ScriptEngine {
         String file = "MCGUI-scripts-" + version + ".jar";
         Path jar = libs.resolve(file);
         if (!Files.isRegularFile(jar) || !sha.equalsIgnoreCase(sha256(jar))) {
-            Files.createDirectories(libs);
-            if (log != null) log.info("Fetching the script engine for pages with scripts (" + file + ", once)");
-            HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).followRedirects(HttpClient.Redirect.NORMAL).build();
-            HttpResponse<byte[]> res = http.send(HttpRequest.newBuilder(URI.create(CDN + file)).timeout(Duration.ofSeconds(120)).GET().build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
-            if (res.statusCode() != 200) {
-                throw new IOException("could not fetch " + CDN + file + " (HTTP " + res.statusCode() + "). Download it into " + libs + " by hand");
+            byte[] body;
+            String source;
+            try (InputStream embedded = ScriptEngine.class.getResourceAsStream("/embedded/MCGUI-scripts.jar")) {
+                if (embedded != null) {
+                    body = embedded.readAllBytes();
+                    source = "the embedded script engine";
+                } else {
+                    if (log != null) log.info("Fetching the script engine for pages with scripts (" + file + ", once)");
+                    HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).followRedirects(HttpClient.Redirect.NORMAL).build();
+                    HttpResponse<byte[]> res = http.send(HttpRequest.newBuilder(URI.create(CDN + file)).timeout(Duration.ofSeconds(120)).GET().build(),
+                            HttpResponse.BodyHandlers.ofByteArray());
+                    if (res.statusCode() != 200) {
+                        throw new IOException("could not fetch " + CDN + file + " (HTTP " + res.statusCode() + "). Download it into " + libs + " by hand");
+                    }
+                    body = res.body();
+                    source = CDN + file;
+                }
             }
-            byte[] body = res.body();
             String got = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body));
-            // The engine runs on the server: anything but the very file this build was made with is refused.
-            if (!sha.equalsIgnoreCase(got)) throw new IOException(CDN + file + " is not the file this build of MC GUI was made with (its SHA-256 differs)");
+            if (!sha.equalsIgnoreCase(got)) throw new IOException(source + " is not the file this build of MC GUI was made with (its SHA-256 differs)");
+            Files.createDirectories(libs);
             Path part = libs.resolve(file + ".part");
             Files.write(part, body);
             Files.move(part, jar, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);

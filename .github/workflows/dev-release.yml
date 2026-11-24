@@ -35,7 +35,7 @@ jobs:
           echo "version=$released+dev.$GITHUB_RUN_NUMBER.$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
       # The tests ran on the pull request that brought this commit in (checks.yml), and run again on this push.
       - name: Build the jar
-        run: sh gradlew build -x test -PbuildVersion='${{ steps.name.outputs.version }}'
+        run: sh gradlew build -x test -PbuildVersion='${{ steps.name.outputs.version }}' -PembedScripts=true
       - name: Replace the dev-latest pre-release
         env:
           VERSION: ${{ steps.name.outputs.version }}
