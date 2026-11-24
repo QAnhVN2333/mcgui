@@ -4,6 +4,7 @@ Ngày tổng hợp: 2026-11-24
 
 Tài liệu này ghi lại trạng thái điều tra để tiếp tục ở session mới. Các nguyên nhân bên dưới là giả thuyết cho đến khi được tái hiện và đo đạc; chưa có thay đổi nào trong working tree được xác nhận là đã giải quyết lỗi.
 
+
 ## 1. Overlay/blur mở nhưng không hiện ổn định
 
 ### Đã quan sát
@@ -56,6 +57,31 @@ Tài liệu này ghi lại trạng thái điều tra để tiếp tục ở sess
 3. So sánh việc đóng view khi block vẫn còn với khi block đã bị phá; xác minh có teleport về `returnTo` thất bại/được chấp nhận nhưng không có nền hay không.
 4. Nếu cần can thiệp close, phải đảm bảo player không bị treo và không bị đưa vào vị trí không an toàn; tránh sửa bằng cách đổi game mode hoặc tắt kiểm tra flying nếu chưa xác định root cause.
 
+## 3. Người chơi bị setback liên tục ở phía client vì clientbehavior gây GUI nhấp nháy liên tục vì vị trí bị setback. (Chỉ xảy ra với fullscreen; đối với blur/overlay không thấy server teleport ngay khi dùng lệnh - khả năng là lỗi không hiển thị GUI ở phân trên đối với overlay/blur đã chặn flow tới bug này)
+- Clientside khi phát hiện người chơi có phần thân dưới chìm xuống 0.2 block sẽ cố ý làm cho player bị trượt xuống nền block thấp hơn(Phần kí hiệu là 0) nếu xung quanh vị trí tâm player đang đứng 1 block có lỗ trống, ví dụ:
+X là có block, p là player, 0 là vị trí không có block ở cùng tầng hoặc cao tầng hơn, mà chỉ có block ở tầng dưới
+``` trường hợp bình thường
+xxx
+xpx
+xxx
+```
+``` trường hợp bị server setback do client cố ý đẩy xuống ô trống
+0xx
+0px
+0xx
+```
+Hệ quả là GUI nhấp nháy liên liên tục mỗi lần setback về vị trí gốc và biến mất khi client cố ý đẩy lệch khỏi vị trí
+### Giải pháp đề xuất
+# Cách 1:
+Gửi packet làm cho block ngay dưới chân player ở clientside player đang mở GUI biến mất, đánh lừa clientside rằng player đang không kẹt trong tường để không thực hiện logic "trôi player xuống". Khi đóng UI thì trả lại block bình thường
+# Cách 2:
+Gửi packet lấp toàn bộ 1 block xung quanh player để ngăn clientside tìm được vị trí thấp hơn để trôi xuống. Phục hồi khi đóng UI
+
+## 4. Phát hiện thông tin có thể có ích đối với lỗi không hiển thị UI dạng overlay/blur ngay lần đầu sau khi dùng lệnh
+- Nếu player đang đứng trên một mặt phẳng (không có block cao hơn block tại chân đang đứng trong bán kính 1 block) thì UI sẽ không xuất hiện, hoặc có với tỉ lệ thấp.
+- Nếu có >= một block nằm cạnh bản thân lúc mở GUI thì GUI luôn xuất hiện bình thường.
+- GUI luôn xuất hiện trở lại nếu người chơi cố gắng di chuyển bằng WASD, nhấp nháy nếu cố di chuyển (có thể là do setback)
+
 ## Thay đổi đang có trong working tree
 
 Các thay đổi này chưa commit và chưa được xác nhận bằng build/test:
@@ -77,3 +103,10 @@ Trạng thái lúc tổng hợp: bốn file trên đang modified; không thấy 
 1. Chạy test tập trung cho thay đổi config: `sh gradlew test --tests ai.resourcepack.ui.framework.SettingsTest`.
 2. Chạy `sh gradlew build`; nếu vẫn dừng ở `OverlayTest.hoverRepaintsOfAnOverlayMatchAFreshPicture`, ghi nhận riêng như baseline đã biết.
 3. Kiểm tra diff và trạng thái working tree trước khi sửa để không ghi đè các thay đổi đang có.
+
+## Cập nhật sau khi đối chiếu mã nguồn (2026-11-24)
+
+- Đã xác nhận `overlayEye()` và `clientEye()` tạo tọa độ shader chính xác, trong khi `nearSeat()` cho phép sai lệch tới `1/32` block. `take()` và `reveal()` hiện luôn gửi teleport ban đầu cho client-pointer; `nearSeat()` chỉ còn dùng để bỏ qua các correction nhỏ sau đó.
+- Log `[view-underfoot]` khi `debug: true` giờ ghi nhận cả block dưới `seat`/`returnTo` của viewer, kể cả khi block bị người khác phá. Log không hủy event và không bảo vệ block.
+- Chưa thay đổi cơ chế flying hoặc gửi fake block: cần tái hiện riêng hai vấn đề này và xác nhận trạng thái client/server trước khi chọn giải pháp.
+- `sh gradlew build -x test`: thành công. `sh gradlew test`: 287 test, 1 lỗi tại `OverlayTest.hoverRepaintsOfAnOverlayMatchAFreshPicture` (chênh lệch tối đa 4 pixel), như baseline đã ghi ở trên; compile main thành công.

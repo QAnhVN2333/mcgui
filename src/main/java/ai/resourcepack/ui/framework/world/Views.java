@@ -1079,11 +1079,11 @@ public final class Views implements Listener {
         v.stage = 1;
         v.keepBy = Platform.tick() + KEEP_TIMEOUT;
         v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
-        boolean teleport = !nearSeat(p.getLocation(), v.seat);
-        v.awaitingTeleport = teleport;
+        // The shader recognizes the exact flagged coordinates, not the server's near-seat tolerance.
+        v.awaitingTeleport = true;
         hold(p);
         p.setGliding(false);
-        if (teleport) nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
+        nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
         // The map before its frame, or the frame shows the map item.
         signature(p, v);
         v.wall.showSignature(p);
@@ -1189,8 +1189,7 @@ public final class Views implements Listener {
     private void reveal(Player p, ViewImpl v) {
         // Before revealed, so turned() never reads a rotation from before the teleport below as the start.
         v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
-        boolean teleport = !nearSeat(p.getLocation(), v.seat);
-        v.awaitingTeleport = teleport;
+        v.awaitingTeleport = v.clientPointer;
         v.revealed = true;
         waiting.remove(v);
         // All in one tick, so the client applies them together with the camera switch.
@@ -1211,7 +1210,7 @@ public final class Views implements Listener {
             // centre, and their own eye stays the camera.
             hold(p);
             p.setGliding(false);
-            if (teleport) Platform.teleport(p, v.seat);
+            Platform.teleport(p, v.seat);
         } else {
             // Mounted once there: at once, but on Folia once its teleport has finished.
             Platform.teleport(p, v.vehicle.getLocation()).thenRun(() -> Threads.now(plugin, p, () -> {
@@ -1900,22 +1899,33 @@ public final class Views implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent e) {
         if (!settings.debug) return;
-        Player player = e.getPlayer();
-        ViewImpl view = views.get(player.getUniqueId());
-        if (view == null) return;
-
-        Location feet = player.getLocation();
-        Block underfoot = feet.clone().subtract(0, 0.01, 0).getBlock();
+        Player breaker = e.getPlayer();
         Block broken = e.getBlock();
-        if (!broken.getWorld().equals(feet.getWorld())
-                || broken.getX() != underfoot.getX() || broken.getY() != underfoot.getY() || broken.getZ() != underfoot.getZ()) return;
+        for (ViewImpl view : views.values()) {
+            boolean seatSupport = blockUnder(view.seat, broken);
+            boolean returnSupport = blockUnder(view.returnTo, broken);
+            boolean breakerSupport = view.player.equals(breaker.getUniqueId())
+                    && blockUnder(breaker.getLocation(), broken);
+            if (!seatSupport && !returnSupport && !breakerSupport) continue;
 
-        String kind = view.keeps ? "kept-overlay" : view.options.overlay() ? "live-overlay" : "fullscreen";
-        plugin.getLogger().info(String.format(Locale.ROOT,
-                "[view-underfoot] %s broke %s at %s:%d,%d,%d in %s (client-pointer=%s, revealed=%s); "
-                        + "player at %.3f,%.3f,%.3f (on-ground=%s)",
-                player.getName(), broken.getType(), broken.getWorld().getName(), broken.getX(), broken.getY(), broken.getZ(),
-                kind, view.clientPointer, view.revealed, feet.getX(), feet.getY(), feet.getZ(), player.isOnGround()));
+            String kind = view.keeps ? "kept-overlay" : view.options.overlay() ? "live-overlay" : "fullscreen";
+            List<String> support = new ArrayList<>();
+            if (seatSupport) support.add("seat");
+            if (returnSupport) support.add("return-to");
+            if (breakerSupport) support.add("breaker-underfoot");
+            plugin.getLogger().info(String.format(Locale.ROOT,
+                    "[view-underfoot] %s broke %s at %s:%d,%d,%d affecting viewer %s in %s "
+                            + "(support=%s, client-pointer=%s, revealed=%s)",
+                    breaker.getName(), broken.getType(), broken.getWorld().getName(), broken.getX(), broken.getY(), broken.getZ(),
+                    view.player, kind, String.join(",", support), view.clientPointer, view.revealed));
+        }
+    }
+
+    private static boolean blockUnder(Location feet, Block block) {
+        return feet != null && feet.getWorld() == block.getWorld()
+                && block.getX() == (int) Math.floor(feet.getX())
+                && block.getY() == (int) Math.floor(feet.getY() - 0.01)
+                && block.getZ() == (int) Math.floor(feet.getZ());
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
