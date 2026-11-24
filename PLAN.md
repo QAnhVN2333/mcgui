@@ -83,7 +83,7 @@ lên armor stand trong chế độ này.
 
 - Hành vi `invisible: true` giữ nguyên potion effect và `hidePlayer` với người khác.
 - Hành vi `invisible: false` không áp dụng invisibility potion effect ở trạng thái server và
-  không gọi `hidePlayer` cho các player khác.
+  không gọi `hidePlayer` cho các player khác. Giá trị mặc định là false
 - Thay phần ẩn hình ảnh của player mở GUI bằng thay đổi **chỉ gửi đến client của player đó**
   qua packet/entity metadata hoặc packet effect phù hợp với các helper trong `Nms`/`Pipeline`.
 - Không dùng `Player#hidePlayer` để ẩn chính player như giải pháp thay thế, vì có thể loại entity

@@ -50,6 +50,8 @@ public final class Pipeline {
     private final Map<UUID, Mouse> mice = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> pinned = new ConcurrentHashMap<>();
     private final Map<UUID, Filter> filters = new ConcurrentHashMap<>();
+    /** Entity ids whose invisibility bit is kept set only on their own client. */
+    private final Map<UUID, Integer> locallyInvisible = new ConcurrentHashMap<>();
     /**
      * Players held still for a client-placed pointer: their client is told they fly at a speed of nothing, and a movement
      * speed that keeps the width of their view as it was.
@@ -153,6 +155,16 @@ public final class Pipeline {
     public void hold(Player player, boolean on) {
         if (on) held.put(player.getUniqueId(), new Held(player.getEntityId()));
         else held.remove(player.getUniqueId());
+    }
+
+    /** Hide or restore the player's model on their own client without changing server-side entity state. */
+    public void localInvisibility(Player player, boolean on) {
+        UUID id = player.getUniqueId();
+        if (on) locallyInvisible.put(id, player.getEntityId());
+        else locallyInvisible.remove(id);
+        if (!nms.send(player, nms.localInvisibility(player, on))) {
+            log.log(Level.WARNING, "Could not update local visibility for " + player.getName() + ": no connection");
+        }
     }
 
     /**
@@ -379,6 +391,7 @@ public final class Pipeline {
     public void forget(UUID player) {
         concealed.remove(player);
         held.remove(player);
+        locallyInvisible.remove(player);
         particlesHidden.remove(player);
         huds.remove(player);
         OwnBars.forget(player);
@@ -450,6 +463,7 @@ public final class Pipeline {
         particlesHidden.clear();
         huds.clear();
         held.clear();
+        locallyInvisible.clear();
     }
 
     /**
@@ -541,6 +555,7 @@ public final class Pipeline {
         private final UUID id;
         private final Object player;
         volatile ChannelHandlerContext ctx;
+        private boolean localVisibilityWarned;
 
         Filter(UUID id, Object player) {
             this.id = id;
@@ -587,6 +602,15 @@ public final class Pipeline {
             if (pin != null && nms.movedEntity(msg) == pin) {
                 promise.trySuccess();
                 return;
+            }
+            Integer hiddenId = locallyInvisible.get(id);
+            if (hiddenId != null) {
+                try {
+                    msg = nms.preserveLocalInvisibility(msg, hiddenId);
+                } catch (RuntimeException e) {
+                    if (!localVisibilityWarned) log.log(Level.WARNING, "Could not preserve local player visibility", e);
+                    localVisibilityWarned = true;
+                }
             }
             if (particlesHidden.contains(id) && nms.onlyParticles(msg)) {
                 promise.trySuccess();

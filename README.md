@@ -138,6 +138,28 @@ page; right-click it to sit down at that page fullscreen
 (`walls.right-click-fullscreen`). Fullscreen pages fill the whole window,
 whatever its shape and the player's FOV.
 
+## Player visibility and damage in views
+
+By default, an open view hides its player from everyone and damage closes the
+view, as before. Set these independent options in `config.yml`:
+
+```yaml
+views:
+  invisible: false
+  close-on-damage: false
+```
+
+With `invisible: false`, other players can still see and attack the player.
+Only their own client hides their player model, and every view uses the
+client-placed pointer even if `views.client-pointer` is off. A nearby clear
+position is required; if there is not one, the view does not open rather than
+falling back to an armor-stand camera.
+
+With `close-on-damage: false`, ordinary damage still reduces health but does
+not close the view. The player remains held in place while it is open, so
+knockback does not move them until they leave. Suffocation, cramming and fall
+damage retain their existing handling. Both options default to `true`.
+
 ## Pointer speed
 
 A fullscreen page's pointer moves a fixed distance for each step the mouse

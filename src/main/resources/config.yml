@@ -149,6 +149,11 @@ views:
   # With the pack, the player's own client draws the pointer every frame from where they look, so it has
   # no network or tick lag. Off: the server moves the pointer as their rotation arrives (20 times a second).
   client-pointer: true
+  # true: hide the player from everyone while their view is open (the original behaviour).
+  # false: hide only the player's own model, keep them visible to others, and always use a client-placed pointer.
+  invisible: true
+  # Whether ordinary damage closes an open view. Damage is still applied either way.
+  close-on-damage: true
   # With a client-drawn pointer: the most hidden maps each view may use for hovers its client shows by itself, the
   # frame the pointer gets there, without waiting for the server (hover layers). The hovers drawn ahead near the
   # pointer are sent in advance, each on a map for every 128x126 part of what it changes; a hover that needs more

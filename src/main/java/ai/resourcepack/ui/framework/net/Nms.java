@@ -138,7 +138,10 @@ public final class Nms {
     private final Class<?> dataPacket;             // ClientboundSetEntityDataPacket(int id, List<DataValue<?>>)
     private final MethodHandle dataPacketId, dataPacketItems, newDataPacket;
     private final MethodHandle dataValueId;        // SynchedEntityData.DataValue#id()
+    private final MethodHandle dataValueValue;     // SynchedEntityData.DataValue#value()
     private final MethodHandle dataValue;          // DataValue.create(EntityDataAccessor, Object)
+    private final MethodHandle entityData, entityDataGet;
+    private final int sharedFlagsId;
     private final Object frameItem;                // ItemFrame.DATA_ITEM
     private final int frameItemId;
     private final MethodHandle newItemStack;       // new ItemStack(ItemLike)
@@ -243,7 +246,11 @@ public final class Nms {
         Class<?> value = Reflect.cls("net.minecraft.network.syncher.SynchedEntityData$DataValue");
         Class<?> accessor = Reflect.cls("net.minecraft.network.syncher.EntityDataAccessor");
         dataValueId = L.unreflect(Reflect.method(value, "id"));
+        dataValueValue = L.unreflect(Reflect.method(value, "value"));
         dataValue = L.unreflect(Reflect.method(value, "create", accessor, Object.class));
+        Class<?> entityDataType = Reflect.cls("net.minecraft.network.syncher.SynchedEntityData");
+        entityData = L.unreflect(Reflect.method(nmsEntity, "getEntityData"));
+        entityDataGet = L.unreflect(Reflect.method(entityDataType, "get", accessor));
         frameItem = open(Reflect.cls("net.minecraft.world.entity.decoration.ItemFrame"), "DATA_ITEM").get(null);
         frameItemId = (int) Reflect.method(accessor, "id").invoke(frameItem);
         newItemStack = Reflect.constructor(L, item, MethodType.methodType(void.class, Reflect.cls("net.minecraft.world.level.ItemLike")));
@@ -263,6 +270,7 @@ public final class Nms {
                 double.class, double.class, double.class, float.class, float.class, entityType, int.class, vec3, double.class));
         noMovement = Reflect.field(vec3, "ZERO").get(null);
         sharedFlags = open(nmsEntity, "DATA_SHARED_FLAGS_ID").get(null);
+        sharedFlagsId = (int) Reflect.method(accessor, "id").invoke(sharedFlags);
         silent = open(nmsEntity, "DATA_SILENT").get(null);
         textOpacity = open(Reflect.cls("net.minecraft.world.entity.Display$TextDisplay"), "DATA_TEXT_OPACITY_ID").get(null);
         newRemoveEntities = Reflect.constructor(L, Reflect.cls(game + "ClientboundRemoveEntitiesPacket"), MethodType.methodType(void.class, int[].class)).asFixedArity();
@@ -616,6 +624,54 @@ public final class Nms {
     /** The packet that sets text display [id]'s text opacity to [opacity] (unsigned) on one client only. */
     public Object textOpacity(int id, int opacity) {
         return make(newDataPacket, id, List.of(make(dataValue, textOpacity, (byte) opacity)));
+    }
+
+    /** A local-player metadata packet; it does not change the entity's server-side flags. */
+    public Object localInvisibility(Player player, boolean invisible) {
+        try {
+            Object data = entityData.invoke(handle(player));
+            byte flags = (byte) entityDataGet.invoke(data, sharedFlags);
+            flags = (byte) (invisible ? flags | (1 << 5) : flags & ~(1 << 5));
+            return newDataPacket.invoke(player.getEntityId(), List.of(dataValue.invoke(sharedFlags, flags)));
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /** Keep a locally hidden player's invisibility bit set in their own entity metadata packets. */
+    public Object preserveLocalInvisibility(Object packet, int entityId) {
+        try {
+            if (dataPacket.isInstance(packet)) return localInvisibleData(packet, entityId);
+            if (!bundlePacket.isInstance(packet)) return packet;
+            Iterable<?> subs = (Iterable<?>) subPackets.invoke(packet);
+            List<Object> out = new ArrayList<>();
+            boolean changed = false;
+            for (Object sub : subs) {
+                Object mapped = dataPacket.isInstance(sub) ? localInvisibleData(sub, entityId) : sub;
+                changed |= mapped != sub;
+                out.add(mapped);
+            }
+            return changed ? newBundle.invoke(out) : packet;
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    private Object localInvisibleData(Object packet, int entityId) throws Throwable {
+        if ((int) dataPacketId.invoke(packet) != entityId) return packet;
+        List<?> items = (List<?>) dataPacketItems.invoke(packet);
+        List<Object> out = new ArrayList<>(items.size());
+        boolean changed = false;
+        for (Object item : items) {
+            if ((int) dataValueId.invoke(item) == sharedFlagsId) {
+                byte flags = (byte) dataValueValue.invoke(item);
+                out.add(dataValue.invoke(sharedFlags, (byte) (flags | (1 << 5))));
+                changed = true;
+            } else {
+                out.add(item);
+            }
+        }
+        return changed ? newDataPacket.invoke(entityId, out) : packet;
     }
 
     /** The packet that takes entities [ids] off a client. */

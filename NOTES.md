@@ -1490,6 +1490,25 @@ Reading a position, a world or a UUID is fine from anywhere. How MC GUI copes, a
   are ignored until the client accepts the teleport to the seat (or 20 ticks
   pass): until then they still carry the old look direction and would throw the
   pointer across the screen.
+- **The nearest safe client-pointer seat may overlap the floor by 0.2 blocks.**
+  `Views.clientEye` keeps the eye in air and checks the rest of the player box
+  for collisions, but tolerates the bottom 0.2 blocks so a ground-level view
+  does not choose a point one block higher and leave the player floating.
+  `nearSeat` skips a redundant seat teleport, including the second teleport
+  while an overlay takes its world. Position corrections wait for the prior
+  teleport acknowledgement/timeout instead of issuing one every tick.
+- **Leaving a held view waits for the return teleport.** On Folia,
+  `Platform.teleport` is asynchronous; held abilities and movement attributes
+  remain in place until the player reaches their saved location, then are
+  restored. Otherwise a player can be released at the airborne seat and fail
+  the server's flying check.
+- **`views.invisible: false` is local-only.** It forces the client-placed
+  pointer and uses `Nms`/`Pipeline` entity metadata for the opening player's
+  own client. The packet filter preserves that client's invisible bit without
+  changing server potion effects or hiding the player from other connections.
+  Both visibility and `views.close-on-damage` default to `true`; disabling
+  close-on-damage leaves ordinary damage applied while the player remains
+  held, so velocity/knockback is still suppressed until the view closes.
 - **Pointer speed is per mouse count, and the count is read off the pitch.**
   `MouseSteps` keeps each online player's last changes of pitch (sampled every
   tick in `Views.learnMice`) and finds the step every one of them is a whole

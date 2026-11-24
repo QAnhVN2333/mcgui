@@ -87,6 +87,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -146,6 +147,10 @@ public final class Views implements Listener {
     private static final double CLIENT_MAX_PITCH = 75;
     /** How far a client-placed view may move the player's eye up or down to find room to hold them, in blocks. */
     private static final double CLIENT_MAX_LIFT = 1.5;
+    /** A view may put the bottom 0.2 blocks of the player's box into the floor rather than leave them floating. */
+    private static final double FLOOR_OVERLAP = 0.2;
+    /** Small client/server position corrections do not need another seat teleport. */
+    private static final double SEAT_TOLERANCE = 1.0 / 32.0;
     /**
      * How far ahead of the camera a view's notice for shaders not the pack's hangs (blocks): inside the camera's own
      * block or the next, so even a view whose picture is in the ground has nothing between it and the eye.
@@ -178,7 +183,7 @@ public final class Views implements Listener {
     private final Map<UUID, ViewImpl> views = new ConcurrentHashMap<>();
     /** The views still opening (not revealed): what {@link #progressed} looks at. */
     private final java.util.Set<ViewImpl> waiting = ConcurrentHashMap.newKeySet();
-    private final NamespacedKey seatKey, returnKey, fovKey, stepKey, pointerKey;
+    private final NamespacedKey seatKey, returnKey, visibilityKey, fovKey, stepKey, pointerKey;
     /** What each online player's mouse turns them by a count, being learned (server thread). */
     private final Map<UUID, MouseSteps> mice = new HashMap<>();
     private final EntityType mannequin;
@@ -199,6 +204,7 @@ public final class Views implements Listener {
         this.firstMapId = firstMapId;
         this.seatKey = new NamespacedKey(plugin, "seated");
         this.returnKey = new NamespacedKey(plugin, "return-to");
+        this.visibilityKey = new NamespacedKey(plugin, "view-invisible");
         this.fovKey = new NamespacedKey(plugin, "fov");
         this.stepKey = new NamespacedKey(plugin, "mouse-step");
         this.pointerKey = new NamespacedKey(plugin, "pointer-speed");
@@ -268,6 +274,8 @@ public final class Views implements Listener {
         final TextDisplay notice;
         final GameMode previousMode;
         final WeatherType previousWeather;
+        /** Whether this view hides the player from other players and changes their server-side potion effect. */
+        final boolean serverInvisible;
         /** The player's own invisibility (a potion), which the view's effect replaces until they stand. */
         final PotionEffect previousInvisibility;
         final Location returnTo;
@@ -353,7 +361,8 @@ public final class Views implements Listener {
             this.notice = notice;
             this.previousMode = p.getGameMode();
             this.previousWeather = p.getPlayerWeather();
-            this.previousInvisibility = p.getPotionEffect(PotionEffectType.INVISIBILITY);
+            this.serverInvisible = settings.invisible;
+            this.previousInvisibility = serverInvisible ? p.getPotionEffect(PotionEffectType.INVISIBILITY) : null;
             this.returnTo = returnTo;
             this.privateView = new PrivateView(wall, cameraAt, !keeps);
             this.layers = layers;
@@ -470,7 +479,9 @@ public final class Views implements Listener {
         // neither moves when it opens nor turns with the pointer. Its frames lie at the camera and its maps place
         // themselves in the window, so its wall is only a set of map ids.
         // The signature map takes the id after the tiles', which must stay inside the views' ids (VIEW_ID_SPAN).
-        Location eye = settings.clientPointer && options.overlay() && canvas.tiles() < span
+        boolean requireClientPointer = !settings.invisible;
+        boolean useClientPointer = settings.clientPointer || requireClientPointer;
+        Location eye = useClientPointer && options.overlay() && canvas.tiles() < span
                 && runsOverlayChain(player) ? overlayEye(player) : null;
         boolean keeps = eye != null;
         MapWall wall = keeps ? new MapWall(player.getWorld(), eye.getBlockX(), eye.getBlockY(), eye.getBlockZ(),
@@ -482,8 +493,14 @@ public final class Views implements Listener {
         // spot by the player's own eye where they can be held (see clientEye). Without one, the server pointer. An
         // overlay with nowhere to hold the player has the server's too (the world shows live round it, still): a
         // client-placed pointer turns the player's own camera, and only a kept world does not turn with it.
-        if (!keeps && settings.clientPointer && !options.overlay()) eye = clientEye(player, wall.facing);
-        if (settings.clientPointer && eye == null) debug("no room to hold " + player.getName() + " still, or no overlay chain: the server places their pointer");
+        if (!keeps && useClientPointer && (!options.overlay() || requireClientPointer)) {
+            eye = clientEye(player, wall.facing, requireClientPointer);
+        }
+        if (requireClientPointer && eye == null) {
+            throw new IllegalStateException("There isn't enough clear space near " + player.getName()
+                    + " to open a visible fullscreen view with a client-placed pointer.");
+        }
+        if (useClientPointer && eye == null) debug("no room to hold " + player.getName() + " still, or no overlay chain: the server places their pointer");
         boolean clientPointer = eye != null;
         Location seat = null;
         if (clientPointer) {
@@ -594,6 +611,7 @@ public final class Views implements Listener {
         // Remembered on the player, so a crash mid-view cannot leave them stuck in adventure mode or in the ground.
         player.getPersistentDataContainer().set(seatKey, PersistentDataType.STRING, player.getGameMode().name());
         player.getPersistentDataContainer().set(returnKey, PersistentDataType.STRING, encode(from));
+        player.getPersistentDataContainer().set(visibilityKey, PersistentDataType.BYTE, (byte) (settings.invisible ? 1 : 0));
         player.setGameMode(GameMode.ADVENTURE);
         // An empty hotbar until they get up, or scrolling would pop up the held item's name.
         pipeline.conceal(player, true);
@@ -609,11 +627,17 @@ public final class Views implements Listener {
             @Override public void tickEnded() { Views.this.tickEnded(view); }
             @Override public void dropped() { Views.this.dropped(view); }
         }, view.pointerId);
-        // Hides the first-person arm; nobody else sees the seated player at all.
-        player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, PotionEffect.INFINITE_DURATION, 0, false, false, false));
+        if (settings.invisible) {
+            // Hides the first-person arm; nobody else sees the seated player at all.
+            player.addPotionEffect(new PotionEffect(PotionEffectType.INVISIBILITY, PotionEffect.INFINITE_DURATION, 0, false, false, false));
+        } else {
+            pipeline.localInvisibility(player, true);
+        }
         // Rain and snow are drawn between the camera and the picture: clear skies for this player only.
         player.setPlayerWeather(WeatherType.CLEAR);
-        for (Player other : Bukkit.getOnlinePlayers()) if (other != player) Threads.now(plugin, other, () -> other.hidePlayer(plugin, player));
+        if (settings.invisible) {
+            for (Player other : Bukkit.getOnlinePlayers()) if (other != player) Threads.now(plugin, other, () -> other.hidePlayer(plugin, player));
+        }
         // A kept overlay's client starts taking the world now, while its panel is drawn and sent, so the round trip that
         // needs is over by the time the panel is there.
         // Their game is loading the pack again, on top of another plugin's that replaced its shaders: nothing of the
@@ -692,12 +716,13 @@ public final class Views implements Listener {
      * the block their eye is in, or the nearest one above or below within {@link #CLIENT_MAX_LIFT}
      * where (1) that block is air, so a look in any direction hits the target round the eye before any
      * block, the client draws no in-wall overlay or fluid fog, and every face is at least 0.27 away; (2)
-     * their whole standing box is clear of every collision, or their client would crouch them (which
+     * the standing box is clear above its lowest 0.2 blocks, so a floor does not leave them floating while
+     * the client would crouch them (which
      * moves the eye) or push them out sideways ({@code Player.updatePlayerPose},
      * {@code LocalPlayer.moveTowardsClosestSpace}); and (3) no lava touches it. Water may: a flying
      * player is not pushed by it (see hold).
      */
-    private static Location clientEye(Player player, BlockFace facing) {
+    private static Location clientEye(Player player, BlockFace facing, boolean allowFloorOverlap) {
         Location at = player.getEyeLocation();
         World world = at.getWorld();
         int bx = at.getBlockX(), bz = at.getBlockZ(), from = at.getBlockY();
@@ -716,10 +741,34 @@ public final class Views implements Listener {
             if (feet < world.getMinHeight() || feet + height > world.getMaxHeight()) continue;
             if (!world.getBlockAt(bx, y, bz).getType().isAir()) continue;
             BoundingBox box = new BoundingBox(x - half, feet + 1e-7, z - half, x + half, feet + height - 1e-7, z + half);
-            if (Platform.collides(world, box) || touchesLava(world, box)) continue;
+            double toleratedFloor = allowFloorOverlap ? Math.min(FLOOR_OVERLAP, height / 2) : 0;
+            BoundingBox aboveFeet = new BoundingBox(x - half, feet + toleratedFloor + 1e-7, z - half,
+                    x + half, feet + height - 1e-7, z + half);
+            boolean collides = Platform.collides(world, box);
+            if (Platform.collides(world, aboveFeet)
+                    || (collides && (toleratedFloor == 0 || !hasShallowFloorOverlap(world, box, feet, toleratedFloor)))
+                    || touchesLava(world, box)) continue;
             return new Location(world, x, eyeY, z);
         }
         return null;
+    }
+
+    private static boolean hasShallowFloorOverlap(World world, BoundingBox box, double feet, double tolerance) {
+        for (int x = (int) Math.floor(box.getMinX()); x <= (int) Math.floor(box.getMaxX()); x++) {
+            for (int y = (int) Math.floor(feet - tolerance); y <= (int) Math.floor(feet + tolerance); y++) {
+                for (int z = (int) Math.floor(box.getMinZ()); z <= (int) Math.floor(box.getMaxZ()); z++) {
+                    for (BoundingBox shape : world.getBlockAt(x, y, z).getCollisionShape().getBoundingBoxes()) {
+                        BoundingBox part = shape.shift(x, y, z);
+                        if (part.getMaxY() <= feet || part.getMaxY() - feet > tolerance
+                                || part.getMinY() >= feet + tolerance
+                                || part.getMaxX() <= box.getMinX() || part.getMinX() >= box.getMaxX()
+                                || part.getMaxZ() <= box.getMinZ() || part.getMinZ() >= box.getMaxZ()) continue;
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -1028,10 +1077,11 @@ public final class Views implements Listener {
         v.stage = 1;
         v.keepBy = Platform.tick() + KEEP_TIMEOUT;
         v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
-        v.awaitingTeleport = true;
+        boolean teleport = !nearSeat(p.getLocation(), v.seat);
+        v.awaitingTeleport = teleport;
         hold(p);
         p.setGliding(false);
-        nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
+        if (teleport) nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
         // The map before its frame, or the frame shows the map item.
         signature(p, v);
         v.wall.showSignature(p);
@@ -1137,7 +1187,8 @@ public final class Views implements Listener {
     private void reveal(Player p, ViewImpl v) {
         // Before revealed, so turned() never reads a rotation from before the teleport below as the start.
         v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
-        v.awaitingTeleport = true;
+        boolean teleport = !nearSeat(p.getLocation(), v.seat);
+        v.awaitingTeleport = teleport;
         v.revealed = true;
         waiting.remove(v);
         // All in one tick, so the client applies them together with the camera switch.
@@ -1158,7 +1209,7 @@ public final class Views implements Listener {
             // centre, and their own eye stays the camera.
             hold(p);
             p.setGliding(false);
-            Platform.teleport(p, v.seat);
+            if (teleport) Platform.teleport(p, v.seat);
         } else {
             // Mounted once there: at once, but on Folia once its teleport has finished.
             Platform.teleport(p, v.vehicle.getLocation()).thenRun(() -> Threads.now(plugin, p, () -> {
@@ -1277,8 +1328,10 @@ public final class Views implements Listener {
             close(p, CloseReason.INTERRUPTED);
             return;
         }
-        if (at.getX() != v.seat.getX() || at.getY() != v.seat.getY() || at.getZ() != v.seat.getZ()) {
+        if (!nearSeat(at, v.seat)) {
             debug("moved off the seat by " + at.toVector().subtract(v.seat.toVector()) + ": putting " + p.getName() + " back");
+            v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
+            v.awaitingTeleport = true;
             nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
         }
     }
@@ -1286,6 +1339,13 @@ public final class Views implements Listener {
     /** Whether [at] is more than 2 blocks from [from], or in another world: the player was sent away. */
     private static boolean farFrom(Location at, Location from) {
         return at.getWorld() != from.getWorld() || at.distanceSquared(from) > 4;
+    }
+
+    private static boolean nearSeat(Location at, Location seat) {
+        return at.getWorld() == seat.getWorld()
+                && Math.abs(at.getX() - seat.getX()) <= SEAT_TOLERANCE
+                && Math.abs(at.getY() - seat.getY()) <= SEAT_TOLERANCE
+                && Math.abs(at.getZ() - seat.getZ()) <= SEAT_TOLERANCE;
     }
 
     /**
@@ -1644,7 +1704,8 @@ public final class Views implements Listener {
         // Back where they were, facing where they faced, before the frames and the overlay's signature go: a kept
         // overlay's client shows the world as it was until then, so the first live frame is from the same spot.
         // Not when they have already gone to another world (the move closed the view), or were sent away: that is where they were sent.
-        if (player.isOnline() && player.getWorld() == v.wall.world && !v.sentAway) Platform.teleport(player, v.returnTo);
+        CompletableFuture<Boolean> returning = player.isOnline() && player.getWorld() == v.wall.world && !v.sentAway
+                ? Platform.teleport(player, v.returnTo) : null;
         // On their own thread: on Folia a player sent far away is in another region than the seat's entities now.
         for (Entity e : v.entities()) Threads.now(plugin, e, e::remove);
         PotionEffect own = v.previousInvisibility;
@@ -1653,7 +1714,12 @@ public final class Views implements Listener {
             int left = own.getDuration() - (Platform.tick() - v.openedAt);
             own = left > 0 ? new PotionEffect(own.getType(), left, own.getAmplifier(), own.isAmbient(), own.hasParticles(), own.hasIcon()) : null;
         }
-        restore(player, v.previousMode, own);
+        restore(player, v.previousMode, own, v.serverInvisible, false, returning == null);
+        if (returning == null) {
+            release(player);
+        } else {
+            afterReturn(player, returning, true);
+        }
         if (v.heldSlot >= 0 && player.isOnline()) player.getInventory().setHeldItemSlot(v.heldSlot);
         if (v.previousWeather != null) player.setPlayerWeather(v.previousWeather);
         else player.resetPlayerWeather();
@@ -1661,7 +1727,7 @@ public final class Views implements Listener {
         v.privateView.close(plugin, player, e -> e instanceof Player other && views.containsKey(other.getUniqueId()));
         v.wall.despawn();
         if (v.layers != null) v.layers.wall.despawn();
-        player.getPersistentDataContainer().remove(returnKey);
+        if (returning == null) player.getPersistentDataContainer().remove(returnKey);
         for (Map.Entry<Key, Boolean> held : v.held.entrySet()) {
             if (!held.getValue()) continue;
             try {
@@ -1686,16 +1752,38 @@ public final class Views implements Listener {
     }
 
     /** [invisibility] is the player's own, put back after the view's; null for none. */
-    private void restore(Player player, GameMode mode, PotionEffect invisibility) {
+    private void restore(Player player, GameMode mode, PotionEffect invisibility, boolean serverInvisible,
+                         boolean releaseHeld, boolean clearSeatState) {
         player.setGameMode(mode);
-        player.removePotionEffect(PotionEffectType.INVISIBILITY);
-        if (invisibility != null) player.addPotionEffect(invisibility);
-        player.getPersistentDataContainer().remove(seatKey);
-        for (Player other : Bukkit.getOnlinePlayers()) Threads.now(plugin, other, () -> other.showPlayer(plugin, player));
+        if (serverInvisible) {
+            player.removePotionEffect(PotionEffectType.INVISIBILITY);
+            if (invisibility != null) player.addPotionEffect(invisibility);
+            for (Player other : Bukkit.getOnlinePlayers()) Threads.now(plugin, other, () -> other.showPlayer(plugin, player));
+        } else if (player.isOnline()) {
+            pipeline.localInvisibility(player, false);
+        }
+        if (clearSeatState) {
+            player.getPersistentDataContainer().remove(seatKey);
+            player.getPersistentDataContainer().remove(visibilityKey);
+        }
         pipeline.conceal(player, false);
         pipeline.showHud(player);
         pipeline.hideParticles(player, false);
-        release(player);
+        if (releaseHeld) release(player);
+    }
+
+    private void afterReturn(Player player, CompletableFuture<Boolean> returning, boolean releaseHeld) {
+        returning.whenComplete((success, error) -> Threads.now(plugin, player, () -> {
+            if (error != null) {
+                plugin.getLogger().log(Level.WARNING, "Could not return " + player.getName() + " from a view", error);
+            } else if (!Boolean.TRUE.equals(success)) {
+                plugin.getLogger().warning("The return teleport for " + player.getName() + "'s view was not accepted");
+            }
+            player.getPersistentDataContainer().remove(seatKey);
+            player.getPersistentDataContainer().remove(visibilityKey);
+            player.getPersistentDataContainer().remove(returnKey);
+            if (releaseHeld) release(player);
+        }));
     }
 
     public void closeAll(CloseReason reason) {
@@ -1746,6 +1834,9 @@ public final class Views implements Listener {
         // Transient on Paper, so never saved there; Spigot saves them with the player, and this takes them off.
         removeModifiers(player);
         String mode = player.getPersistentDataContainer().get(seatKey, PersistentDataType.STRING);
+        String back = player.getPersistentDataContainer().get(returnKey, PersistentDataType.STRING);
+        Location to = back == null ? null : decode(back);
+        boolean returningFromView = mode != null && to != null;
         if (mode != null) {
             GameMode gm;
             try {
@@ -1754,17 +1845,22 @@ public final class Views implements Listener {
                 gm = GameMode.SURVIVAL;
             }
             // Their own invisibility is not known here: it was only kept in memory, which the crash lost.
-            restore(player, gm, null);
+            Byte hiddenFromOthers = player.getPersistentDataContainer().get(visibilityKey, PersistentDataType.BYTE);
+            restore(player, gm, null, hiddenFromOthers == null || hiddenFromOthers != 0,
+                    !returningFromView, !returningFromView);
         }
-        String back = player.getPersistentDataContainer().get(returnKey, PersistentDataType.STRING);
         if (back != null) {
-            Location to = decode(back);
-            if (to != null) Platform.teleport(player, to);
-            player.getPersistentDataContainer().remove(returnKey);
+            if (to != null) {
+                CompletableFuture<Boolean> returning = Platform.teleport(player, to);
+                if (returningFromView) afterReturn(player, returning, true);
+                else if (mode == null) afterReturn(player, returning, false);
+            } else {
+                player.getPersistentDataContainer().remove(returnKey);
+            }
         }
         for (ViewImpl v : views.values()) {
             Player seated = Bukkit.getPlayer(v.player);
-            if (seated != null) player.hidePlayer(plugin, seated);
+            if (seated != null && v.serverInvisible) player.hidePlayer(plugin, seated);
         }
     }
 
@@ -1886,7 +1982,9 @@ public final class Views implements Listener {
         switch (e.getCause()) {
             case SUFFOCATION, CRAMMING, FALL -> e.setCancelled(true);
             // Hurt: get up and deal with it.
-            default -> Threads.on(plugin, p, () -> close(p, CloseReason.INTERRUPTED));
+            default -> {
+                if (settings.closeOnDamage) Threads.on(plugin, p, () -> close(p, CloseReason.INTERRUPTED));
+            }
         }
     }
 
