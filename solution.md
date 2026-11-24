@@ -2,7 +2,7 @@
 
 Tài liệu này phân tích chi tiết nguyên nhân gốc rễ (**Root Cause**) và đề xuất giải pháp (**Solution**) cho toàn bộ các vấn đề được nêu trong [`issues.md`](file:///D:/Code/PluginJava/MCUI/mcgui/issues.md).
 
-> **Trạng thái kiểm chứng:** Phần sai lệch giữa `nearSeat` và tọa độ shader đã được xác nhận trực tiếp từ mã nguồn và xử lý bằng teleport căn chỉnh vô điều kiện khi mở view có client-pointer. Các phân tích về vanilla flight check và client tự đẩy người chơi ở vấn đề 2–3 vẫn là giả thuyết; không áp dụng các patch `allowFlight` hoặc fake block bên dưới cho tới khi tái hiện và xác nhận luồng thực tế.
+> **Trạng thái kiểm chứng:** Lỗi căn chỉnh giữa `nearSeat` và tọa độ shader đã được xác nhận, đã sửa và người dùng xác nhận overlay/blur hoạt động ổn định. Người dùng cũng đã xác nhận client tự trôi khỏi seat khi phần chân giao với block và server teleport trả lại, tạo vòng lặp ở fullscreen; fake AIR đã được triển khai cho block giao với seat, chờ kiểm tra trên server thật. Vấn đề kick flying vẫn cần kiểm chứng; hiện giải pháp là đóng view khi block hỗ trợ bị phá, chưa thay đổi `allowFlight`.
 
 ---
 
@@ -182,7 +182,7 @@ private int getMaximumFlyingTicks(Entity entity) {
 
 ### Giải pháp đề xuất (Solution cho Vấn đề 2)
 
-> Đây là giả thuyết cần kiểm chứng trên phiên bản server mục tiêu. Việc bật `allowFlight` phải lưu/khôi phục đúng trạng thái ban đầu qua mọi đường đóng view và khôi phục sau crash; không nên áp dụng đoạn mã minh họa như một patch hoàn chỉnh trước khi xác nhận cơ chế đếm flying.
+> Cơ chế cụ thể của vanilla flight check vẫn cần kiểm chứng trên server mục tiêu. Đã triển khai biện pháp an toàn theo yêu cầu: khi block dưới `seat`, `returnTo` hoặc vị trí hiện tại của viewer bị phá, view đóng với `CloseReason.INTERRUPTED`; block break không bị hủy. Chưa bật `allowFlight` vì chưa có bằng chứng cần thay đổi quyền bay.
 
 #### Giải pháp 1 (Chuẩn Bukkit API nhất & Toàn diện nhất - Khuyên dùng):
 Bật cờ bay hợp lệ trên Server bằng Bukkit API trong suốt thời gian người chơi ở trong view:
@@ -204,27 +204,9 @@ Bật cờ bay hợp lệ trên Server bằng Bukkit API trong suốt thời gia
    Trước khi teleport về `v.returnTo`, kiểm tra nếu block tại chân `v.returnTo` là `AIR` và người chơi sẽ rơi:
    - Vì `aboveGroundTickCount` trong suốt view bằng `0`, người chơi rơi tự do tự nhiên dưới tác động của trọng lực (`deltaY < -0.03125`), server sẽ reset tick đếm và không bao giờ kick!
 
-#### Giải pháp 2 (Bổ trợ - Bảo vệ block dưới chân khi đang mở view, có thể implement tuy nhiên không nên mặc định bật vì người chơi có thể lạm dụng để ngăn người chơi khác đập block):
-Mở rộng Listener `BlockBreakEvent` trong `Views.java`:
-- Thay vì chỉ kiểm tra nếu người phá block là chính viewer (như code hiện tại), hãy kiểm tra nếu block bị phá nằm ngay dưới chân (`seat` hoặc `returnTo`) của **bất kỳ viewer nào đang mở view**:
-```java
-@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
-public void onBlockBreak(BlockBreakEvent e) {
-    Block broken = e.getBlock();
-    for (ViewImpl v : views.values()) {
-        Player p = Bukkit.getPlayer(v.player);
-        if (p == null || !p.isOnline()) continue;
-        
-        Block underSeat = v.seat != null ? v.seat.getBlock().getRelative(BlockFace.DOWN) : null;
-        Block underReturn = v.returnTo != null ? v.returnTo.getBlock().getRelative(BlockFace.DOWN) : null;
-        
-        if (broken.equals(underSeat) || broken.equals(underReturn)) {
-            e.setCancelled(true); // Ngăn không cho phá block điểm tựa của người đang xem menu
-            return;
-        }
-    }
-}
-```
+#### Cách xử lý đã triển khai: đóng view nếu block hỗ trợ bị phá
+
+`BlockBreakEvent` kiểm tra block bên dưới `seat` và `returnTo` của tất cả viewer, đồng thời kiểm tra chân người phá nếu họ chính là viewer. View bị ảnh hưởng được đóng trên thread sở hữu player với `CloseReason.INTERRUPTED`. Event không bị hủy, nên người chơi khác vẫn phá block bình thường.
 
 ---
 
@@ -274,17 +256,17 @@ Khi chân người chơi bị lún vào trong một khối block đặc:
 
 ### Giải pháp đề xuất (Solution cho Vấn đề 3)
 
-Đây là giả thuyết trong `issues.md`, chưa được xác nhận bằng tái hiện hoặc trace client:
+Người dùng đã xác nhận trên client thật rằng khi có khoảng trống, client luôn đẩy player về hướng đó trước khi server teleport họ lại `seat`; block gây va chạm chính là block tại seat mà phần chân chồng vào.
 
-#### Phương án cần kiểm chứng: Gửi Fake Block `AIR` dưới chân người chơi ở phía Client
-Khi người chơi mở Fullscreen view, Server gửi packet giả lập biến khối block mà chân người chơi đang lún vào thành `AIR` (chỉ trên màn hình của chính người chơi đó).
-- **Nếu giả thuyết client đang xử lý va chạm với block sàn là đúng, cách này có thể giúp vì:**
+#### Giải pháp đang chờ kiểm chứng trong game: gửi Fake Block `AIR` tại seat
+
+Với fullscreen dùng client-pointer, server gửi block tại `seat.getBlock()` thành `AIR` chỉ cho client đó. Điều này nhằm ngăn client xử lý va chạm tại phần chân đang chồng vào block; overlay không dùng nhánh này vì không có overlap sàn theo luồng `overlayEye`.
+- Dự đoán cần xác nhận sau khi cài build:
   - Trong mắt client, khối block dưới chân là `AIR` $\rightarrow$ `suffocatesAt(pos)` trả về `false`.
   - Client không thấy mình bị ngạt/lún trong block $\rightarrow$ `moveTowardsClosestSpace` **hoàn toàn không được kích hoạt**!
   - Không có bất kỳ lực đẩy nào sinh ra từ client!
   - Người chơi không bị rơi vì đã có `abilities.flying = true` và `GRAVITY = 0`.
-- **Khi đóng view (`release`):**
-  Server gửi lại block thực tế của thế giới cho client để khôi phục nguyên trạng.
+- Khi đóng view, sau teleport về vị trí ban đầu, server gửi lại `BlockData` hiện tại của thế giới (không dùng snapshot cũ), tránh khôi phục trạng thái block đã bị thay đổi trong lúc view mở.
 
 ---
 
@@ -309,9 +291,9 @@ nms.teleportKeepingRotation(p, v.seat.getX(), v.seat.getY(), v.seat.getZ());
 
 ---
 
-### Bước 2: Hướng xử lý đang chờ xác minh cho lỗi kick Flying (Vấn đề 2)
+### Bước 2: Đóng view khi mất block hỗ trợ; xác minh riêng lỗi kick Flying (Vấn đề 2)
 
-Không áp dụng đoạn mã dưới đây như patch trực tiếp: cần xác nhận counter/check của đúng server version và thiết kế lưu/khôi phục `allowFlight` an toàn cả khi đóng view lẫn khi plugin/server dừng bất thường.
+Việc đóng view khi support block bị phá đã được triển khai như mô tả ở trên. Đoạn mã `allowFlight` dưới đây chỉ là phương án dự phòng, chưa áp dụng; trước đó cần xác nhận counter/check của đúng server version và thiết kế lưu/khôi phục quyền bay an toàn qua mọi đường đóng/rejoin.
 
 Trong class `ViewImpl` (trong `Views.java`), thêm lưu trữ `previousAllowFlight`:
 ```java
@@ -359,61 +341,11 @@ private void release(Player player) {
 }
 ```
 
-Và thêm listener bảo vệ block dưới chân người xem menu:
-```java
-@EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
-public void onBlockBreak(BlockBreakEvent e) {
-    Block broken = e.getBlock();
-    for (ViewImpl v : views.values()) {
-        if (v.seat != null && broken.equals(v.seat.getBlock().getRelative(BlockFace.DOWN))) {
-            e.setCancelled(true);
-            return;
-        }
-        if (v.returnTo != null && broken.equals(v.returnTo.getBlock().getRelative(BlockFace.DOWN))) {
-            e.setCancelled(true);
-            return;
-        }
-    }
-}
-```
-
 ---
 
-### Bước 3: Hướng xử lý đang chờ tái hiện cho lỗi client đẩy gây nhấp nháy (Vấn đề 3)
+### Bước 3: Fake AIR cho fullscreen khi chân giao với block (Vấn đề 3)
 
-Chưa gửi fake block cho client trước khi xác nhận tọa độ block gây va chạm và thời điểm client/server setback. Fake block có thể làm sai hình ảnh hoặc trạng thái block nếu thế giới thay đổi trong lúc view đang mở.
-Trong `ViewImpl`, thêm danh sách các khối block giả đã gửi:
-```java
-final List<Block> fakeAirBlocks = new ArrayList<>();
-```
-
-Khi mở view client-pointer (`reveal` hoặc `open`):
-```java
-// Gửi fake block AIR cho các block va chạm với chân player
-if (v.clientPointer && v.seat != null) {
-    Location feetLoc = v.seat.clone();
-    Block footBlock = feetLoc.getBlock();
-    Block belowFoot = footBlock.getRelative(BlockFace.DOWN);
-    
-    for (Block b : new Block[]{footBlock, belowFoot}) {
-        if (b.getType().isSolid()) {
-            p.sendBlockChange(b.getLocation(), Material.AIR.createBlockData());
-            v.fakeAirBlocks.add(b);
-        }
-    }
-}
-```
-
-Khi đóng view (`close`):
-```java
-// Khôi phục lại các block thực tế từ world
-for (Block b : v.fakeAirBlocks) {
-    if (player.isOnline()) {
-        player.sendBlockChange(b.getLocation(), b.getBlockData());
-    }
-}
-v.fakeAirBlocks.clear();
-```
+Trong `reveal()`, chỉ với fullscreen client-pointer, `hideSeatCollision()` kiểm tra block tại `seat`; nếu block không passable thì gửi `AIR` cho viewer và ghi block vào `ViewImpl.fakeAirBlocks`. Khi `close()` hoàn tất teleport trả về, `restoreFakeBlocks()` gửi `block.getBlockData()` hiện tại cho viewer rồi xóa danh sách. Không fake block phụ bên dưới và không áp dụng cho overlay/server-pointer.
 
 ---
 
@@ -422,8 +354,8 @@ v.fakeAirBlocks.clear();
 | Vấn đề | Nguyên nhân gốc rễ | Giải pháp then chốt |
 | :--- | :--- | :--- |
 | **1. Overlay/Blur không hiện trên mặt phẳng** | Đã xác nhận `nearSeat` có thể coi tọa độ flagged là “đủ gần” dù shader cần tọa độ chính xác. Chưa xác nhận đây là nguyên nhân duy nhất của mọi lần overlay không hiện. | Đã sửa: teleport căn chỉnh vô điều kiện ở `take()` và `reveal()` cho client-pointer. Kiểm chứng lại trên server/client thật. |
-| **2. Kick flying khi mất block sàn** | Chưa xác nhận counter/nhánh flight-check của đúng server version hoặc thứ tự teleport/release có gây kick hay không. | Chưa thay đổi hành vi; trước hết thu thập bằng chứng theo checklist dưới đây. |
-| **3. Client đẩy trượt gây nhấp nháy GUI** | Chưa xác nhận client đang đẩy do overlap sàn hay server đang setback vì nguyên nhân khác. | Chưa gửi fake block; trước hết xác nhận tọa độ, layout block và nhịp teleport/correction. |
+| **2. Kick flying khi mất block sàn** | Chưa xác nhận counter/nhánh flight-check của đúng server version hoặc thứ tự teleport/release có gây kick hay không. | Đóng view khi block dưới seat/returnTo bị phá; không hủy event. Kiểm chứng lại việc kick. |
+| **3. Client đẩy trượt gây nhấp nháy GUI** | Người dùng xác nhận client đẩy player về khoảng trống rồi server teleport họ lại seat; block va chạm là block giao với phần chân. | Đã triển khai fake AIR cho `seat.getBlock()` trong fullscreen client-pointer; kiểm tra trong game và xác nhận block được phục hồi khi đóng. |
 
 ---
 
@@ -462,15 +394,17 @@ Chỉ thử trên server test hoặc khu vực an toàn, dùng block có thể �
 
 Gửi: ca nào tái hiện; loại view và `client-pointer`; vị trí block bị phá; có log `[view-underfoot]` nào xuất hiện (gửi nguyên dòng, có thể ẩn tên); thời điểm block bị phá, đóng view, teleport về vị trí cũ và kick; thông báo kick nguyên văn; video nếu được. Ghi rõ người chơi bị kick có rơi xuống sau khi đóng không, và có plugin bay/anti-cheat hoặc plugin thay đổi game mode/flight không.
 
+**Kiểm tra thay đổi hiện tại:** view của người chơi bị ảnh hưởng phải tự đóng sau khi block break được chấp nhận; block vẫn phải bị phá bình thường. Ghi lại xem viewer còn bị kick sau khi view đóng hay không.
+
 **Bằng chứng cần để chọn giải pháp:** xác nhận viewer nào đang đứng/được giữ trên block đó; `returnTo` có còn chỗ đỡ không; teleport return thành công hay thất bại; người chơi có bắt đầu rơi trước khi kick không. Chỉ khi xác nhận flight-check vanilla là nguyên nhân mới cân nhắc bật `allowFlight` tạm thời; giải pháp phải khôi phục chính xác quyền bay ban đầu, kể cả sau crash/rejoin. Không hủy `BlockBreakEvent` mặc định vì sẽ cản người chơi phá block của người khác.
 
-### Vấn đề 3: Fullscreen nhấp nháy/setback
+### Vấn đề 3: Xác nhận fake AIR đã dập được chu kỳ setback chưa
 
-Thử fullscreen với client-pointer tại hai layout an toàn: (A) mặt phẳng kín quanh người chơi; (B) có một hướng cạnh bên là khoảng trống/bậc thấp. Giữ nguyên vị trí, page và cấu hình; quay video 5–10 giây khi không nhấn phím, sau đó thử riêng một lần có nhấn WASD.
+Người dùng đã xác nhận nguyên nhân bằng thử nghiệm trước patch: có khoảng trống thì client đẩy player về hướng đó, server teleport lại seat; block gây đẩy chính là block tại seat chồng vào phần chân. Không cần lặp lại bước xác nhận nguyên nhân. Sau khi cài build có fake AIR, thử fullscreen client-pointer tại hai layout an toàn: (A) vị trí đã gây lỗi; (B) nền/block nơi seat giao nhau vẫn còn nguyên sau khi đóng view.
 
-Gửi: sơ đồ block 3×3 quanh người chơi ở tầng chân và tầng ngay dưới (đánh dấu `P` là người chơi, `#` là block đặc, `.` là trống); loại block dưới chân; phiên bản client; tọa độ vị trí/seat nếu có; video thể hiện nhấp nháy; log debug các dòng `moved off the seat`/`putting ... back` hoặc teleport lặp lại và thời điểm tương ứng. Cho biết lỗi có còn nếu nền là block đầy đủ, không có khoảng trống cạnh bên hay không.
+Gửi: GUI có còn nhấp nháy không; log còn lặp `moved off the seat`/teleport không; video 5–10 giây; sau đóng view block client có hiện lại đúng loại/block state không. Báo riêng nếu lỗi chỉ hết khi block bị phá hoặc đổi block, vì khi đó fake AIR có thể bị ghi đè bởi block update khác.
 
-**Bằng chứng cần để chọn giải pháp:** xác nhận client tự lệch trước rồi server teleport về (chu kỳ lặp), và vị trí seat thật sự chồng vào collision shape nào. Nếu không thấy server correction lặp, cần kiểm tra pipeline shader/panel trước khi sửa collision. Chỉ cân nhắc fake block sau khi biết chính xác block/khối nào gây đẩy và có cách khôi phục theo trạng thái thế giới mới nhất khi block thay đổi, view đóng, người chơi thoát hoặc server dừng.
+**Tiêu chí thành công:** khi view mở, client không còn drift/teleport lặp và GUI ổn định; khi đóng, block được phục hồi theo trạng thái thế giới hiện tại. Nếu chưa đạt, gửi log/video và layout block để điều tra block updates hoặc đường restore; không mở rộng fake AIR sang overlay hay nhiều block xung quanh khi chưa có bằng chứng cần thiết.
 
 ### Mẫu phản hồi
 
@@ -491,7 +425,13 @@ Issue 2:
 - Thông báo kick nguyên văn:
 
 Issue 3:
-- Sơ đồ block 3x3 + block dưới chân:
-- Số lần correction/setback và debug log:
-- Video/tọa độ (nếu có):
+- Fake AIR đã hết drift/nhấp nháy chưa:
+- Block thật có được phục hồi đúng sau close không:
+- Debug log/video nếu còn lỗi:
 ```
+
+### Trạng thái kiểm tra bản hiện tại
+
+- `sh gradlew build -x test`: thành công.
+- `sh gradlew test`: 287 test, 1 lỗi tại `OverlayTest.hoverRepaintsOfAnOverlayMatchAFreshPicture` (chênh tối đa 4 pixel), cùng lỗi baseline đã ghi nhận trước đó; 1 test bị skip.
+- Fake AIR và tự đóng view đã compile/build nhưng vẫn cần xác nhận bằng client/server thật.

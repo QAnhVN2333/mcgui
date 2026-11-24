@@ -281,6 +281,8 @@ public final class Views implements Listener {
         /** The player's own invisibility (a potion), which the view's effect replaces until they stand. */
         final PotionEffect previousInvisibility;
         final Location returnTo;
+        /** Blocks shown as air to this client while it is seated inside their collision shape. */
+        final List<Block> fakeAirBlocks = new ArrayList<>();
         final PrivateView privateView;
         /** Hover layers (see {@link HoverLayers}); null without. */
         final LayerSet layers;
@@ -1186,6 +1188,28 @@ public final class Views implements Listener {
         }, 2);
     }
 
+    private void hideSeatCollision(Player player, ViewImpl view) {
+        if (view.options.overlay() || view.seat == null) return;
+        Block block = view.seat.getBlock();
+        if (block.isPassable()) return;
+        view.fakeAirBlocks.add(block);
+        player.sendBlockChange(block.getLocation(), Material.AIR.createBlockData());
+    }
+
+    private void restoreFakeBlocks(Player player, ViewImpl view) {
+        try {
+            if (player.isOnline()) {
+                for (Block block : view.fakeAirBlocks) {
+                    if (player.getWorld() == block.getWorld()) {
+                        player.sendBlockChange(block.getLocation(), block.getBlockData());
+                    }
+                }
+            }
+        } finally {
+            view.fakeAirBlocks.clear();
+        }
+    }
+
     private void reveal(Player p, ViewImpl v) {
         // Before revealed, so turned() never reads a rotation from before the teleport below as the start.
         v.settleBy = Platform.tick() + SETTLE_TIMEOUT;
@@ -1210,6 +1234,7 @@ public final class Views implements Listener {
             // centre, and their own eye stays the camera.
             hold(p);
             p.setGliding(false);
+            hideSeatCollision(p, v);
             Platform.teleport(p, v.seat);
         } else {
             // Mounted once there: at once, but on Folia once its teleport has finished.
@@ -1717,9 +1742,13 @@ public final class Views implements Listener {
         }
         restore(player, v.previousMode, own, v.serverInvisible, false, returning == null);
         if (returning == null) {
-            release(player);
+            try {
+                restoreFakeBlocks(player, v);
+            } finally {
+                release(player);
+            }
         } else {
-            afterReturn(player, returning, true);
+            afterReturn(player, returning, true, () -> restoreFakeBlocks(player, v));
         }
         if (v.heldSlot >= 0 && player.isOnline()) player.getInventory().setHeldItemSlot(v.heldSlot);
         if (v.previousWeather != null) player.setPlayerWeather(v.previousWeather);
@@ -1774,6 +1803,10 @@ public final class Views implements Listener {
     }
 
     private void afterReturn(Player player, CompletableFuture<Boolean> returning, boolean releaseHeld) {
+        afterReturn(player, returning, releaseHeld, () -> {});
+    }
+
+    private void afterReturn(Player player, CompletableFuture<Boolean> returning, boolean releaseHeld, Runnable afterTeleport) {
         returning.whenComplete((success, error) -> Threads.now(plugin, player, () -> {
             if (error != null) {
                 plugin.getLogger().log(Level.WARNING, "Could not return " + player.getName() + " from a view", error);
@@ -1783,7 +1816,11 @@ public final class Views implements Listener {
             player.getPersistentDataContainer().remove(seatKey);
             player.getPersistentDataContainer().remove(visibilityKey);
             player.getPersistentDataContainer().remove(returnKey);
-            if (releaseHeld) release(player);
+            try {
+                afterTeleport.run();
+            } finally {
+                if (releaseHeld) release(player);
+            }
         }));
     }
 
@@ -1898,26 +1935,30 @@ public final class Views implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent e) {
-        if (!settings.debug) return;
         Player breaker = e.getPlayer();
         Block broken = e.getBlock();
-        for (ViewImpl view : views.values()) {
+        for (ViewImpl view : List.copyOf(views.values())) {
             boolean seatSupport = blockUnder(view.seat, broken);
             boolean returnSupport = blockUnder(view.returnTo, broken);
             boolean breakerSupport = view.player.equals(breaker.getUniqueId())
                     && blockUnder(breaker.getLocation(), broken);
             if (!seatSupport && !returnSupport && !breakerSupport) continue;
 
-            String kind = view.keeps ? "kept-overlay" : view.options.overlay() ? "live-overlay" : "fullscreen";
-            List<String> support = new ArrayList<>();
-            if (seatSupport) support.add("seat");
-            if (returnSupport) support.add("return-to");
-            if (breakerSupport) support.add("breaker-underfoot");
-            plugin.getLogger().info(String.format(Locale.ROOT,
-                    "[view-underfoot] %s broke %s at %s:%d,%d,%d affecting viewer %s in %s "
-                            + "(support=%s, client-pointer=%s, revealed=%s)",
-                    breaker.getName(), broken.getType(), broken.getWorld().getName(), broken.getX(), broken.getY(), broken.getZ(),
-                    view.player, kind, String.join(",", support), view.clientPointer, view.revealed));
+            if (settings.debug) {
+                String kind = view.keeps ? "kept-overlay" : view.options.overlay() ? "live-overlay" : "fullscreen";
+                List<String> support = new ArrayList<>();
+                if (seatSupport) support.add("seat");
+                if (returnSupport) support.add("return-to");
+                if (breakerSupport) support.add("breaker-underfoot");
+                plugin.getLogger().info(String.format(Locale.ROOT,
+                        "[view-underfoot] %s broke %s at %s:%d,%d,%d affecting viewer %s in %s "
+                                + "(support=%s, client-pointer=%s, revealed=%s)",
+                        breaker.getName(), broken.getType(), broken.getWorld().getName(), broken.getX(), broken.getY(), broken.getZ(),
+                        view.player, kind, String.join(",", support), view.clientPointer, view.revealed));
+            }
+
+            Player viewer = Bukkit.getPlayer(view.player);
+            if (viewer != null) Threads.on(plugin, viewer, () -> close(viewer, CloseReason.INTERRUPTED));
         }
     }
 
