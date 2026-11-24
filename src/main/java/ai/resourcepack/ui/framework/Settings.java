@@ -35,6 +35,8 @@ public final class Settings {
     public final boolean invisible;
     /** Whether ordinary damage closes an open view. */
     public final boolean closeOnDamage;
+    /** Whether verbose diagnostic log messages are enabled. */
+    public final boolean debug;
     /**
      * Hidden maps each client-placed view gets for hover layers (api/HoverLayers): pictures its client switches to by
      * itself when the pointer goes over an element. 0: none.
@@ -75,6 +77,7 @@ public final class Settings {
         clientPointer = c.getBoolean("views.client-pointer", true);
         invisible = c.getBoolean("views.invisible", true);
         closeOnDamage = c.getBoolean("views.close-on-damage", true);
+        debug = c.getBoolean("debug", false);
         hoverLayers = Math.max(0, Math.min(512, c.getInt("views.hover-layers", 0)));
         debugPointer = c.getBoolean("views.debug-pointer", false);
         shadersNotice = c.getString("views.shaders-notice",

@@ -255,4 +255,5 @@ cpu-threads: 0
 # long as the world has fewer maps than this.
 map-id-base: 2000000000
 
+# Verbose diagnostic logs, including [view-underfoot] when a player with an open view breaks the block beneath them.
 debug: false

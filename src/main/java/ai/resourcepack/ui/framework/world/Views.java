@@ -35,6 +35,7 @@ import org.bukkit.WeatherType;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.attribute.AttributeModifier;
+import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.BlockDisplay;
@@ -49,6 +50,7 @@ import org.bukkit.entity.Vehicle;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDismountEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
@@ -1893,6 +1895,27 @@ public final class Views implements Listener {
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInteract(PlayerInteractEvent e) {
         if (views.containsKey(e.getPlayer().getUniqueId())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockBreak(BlockBreakEvent e) {
+        if (!settings.debug) return;
+        Player player = e.getPlayer();
+        ViewImpl view = views.get(player.getUniqueId());
+        if (view == null) return;
+
+        Location feet = player.getLocation();
+        Block underfoot = feet.clone().subtract(0, 0.01, 0).getBlock();
+        Block broken = e.getBlock();
+        if (!broken.getWorld().equals(feet.getWorld())
+                || broken.getX() != underfoot.getX() || broken.getY() != underfoot.getY() || broken.getZ() != underfoot.getZ()) return;
+
+        String kind = view.keeps ? "kept-overlay" : view.options.overlay() ? "live-overlay" : "fullscreen";
+        plugin.getLogger().info(String.format(Locale.ROOT,
+                "[view-underfoot] %s broke %s at %s:%d,%d,%d in %s (client-pointer=%s, revealed=%s); "
+                        + "player at %.3f,%.3f,%.3f (on-ground=%s)",
+                player.getName(), broken.getType(), broken.getWorld().getName(), broken.getX(), broken.getY(), broken.getZ(),
+                kind, view.clientPointer, view.revealed, feet.getX(), feet.getY(), feet.getZ(), player.isOnGround()));
     }
 
     @EventHandler(priority = EventPriority.LOWEST)

@@ -13,6 +13,7 @@ class SettingsTest {
 
         assertTrue(settings.invisible);
         assertTrue(settings.closeOnDamage);
+        assertFalse(settings.debug);
     }
 
     @Test
@@ -25,5 +26,13 @@ class SettingsTest {
 
         assertFalse(settings.invisible);
         assertFalse(settings.closeOnDamage);
+    }
+
+    @Test
+    void debugCanBeEnabled() {
+        YamlConfiguration config = new YamlConfiguration();
+        config.set("debug", true);
+
+        assertTrue(Settings.load(config).debug);
     }
 }
